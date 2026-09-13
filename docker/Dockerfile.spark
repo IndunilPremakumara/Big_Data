@@ -1,0 +1,71 @@
+# =============================================================================
+# Spark image: serves as master, worker, and driver for both the streaming and
+# batch jobs.
+#
+# Built from python:3.11-slim + the pyspark wheel rather than an upstream Spark
+# image. The wheel ships the complete Spark distribution (bin/, sbin/, jars/), so
+# one deterministic image runs the whole cluster, and the Python version is the
+# one the pipeline code is written against rather than whatever the base image
+# happened to pin.
+#
+# Connector JARs are baked in at build time instead of resolved at runtime with
+# --packages. Runtime resolution would make every container start depend on
+# Maven Central being reachable, and would silently drift between builds.
+# =============================================================================
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-17-jre-headless \
+        curl \
+        procps \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+COPY requirements-base.txt requirements-spark.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-spark.txt
+
+# pyspark installs the distribution inside site-packages; expose it as SPARK_HOME
+# so bin/spark-submit, sbin/start-master.sh and friends are on PATH.
+ENV SPARK_HOME=/usr/local/lib/python3.11/site-packages/pyspark
+ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
+
+# --- Connector JARs ----------------------------------------------------------
+# Versions are pinned to Spark 3.5.1 / Scala 2.12 / Hadoop 3.3.4:
+#   spark-sql-kafka + token-provider  Kafka source for Structured Streaming
+#   kafka-clients, commons-pool2      transitive deps of the above
+#   hadoop-aws + aws-java-sdk-bundle  S3A filesystem for MinIO
+#   postgresql                        JDBC sink/source for the serving store
+ARG MAVEN=https://repo1.maven.org/maven2
+RUN set -eux; \
+    for jar in \
+      "org/apache/spark/spark-sql-kafka-0-10_2.12/3.5.1/spark-sql-kafka-0-10_2.12-3.5.1.jar" \
+      "org/apache/spark/spark-token-provider-kafka-0-10_2.12/3.5.1/spark-token-provider-kafka-0-10_2.12-3.5.1.jar" \
+      "org/apache/kafka/kafka-clients/3.4.1/kafka-clients-3.4.1.jar" \
+      "org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar" \
+      "org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar" \
+      "com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar" \
+      "org/postgresql/postgresql/42.7.3/postgresql-42.7.3.jar" \
+    ; do \
+      curl -fsSL --retry 5 --retry-delay 3 -o "${SPARK_HOME}/jars/$(basename "$jar")" "${MAVEN}/${jar}"; \
+    done; \
+    ls -la "${SPARK_HOME}/jars/" | grep -E "kafka|hadoop-aws|postgresql|aws-java" ; \
+    test -x "${SPARK_HOME}/bin/spark-submit"; \
+    test -f "${SPARK_HOME}/sbin/start-master.sh"
+
+WORKDIR /opt/pipeline
+ENV PYTHONPATH=/opt/pipeline
+
+# Spark writes work dirs and event logs as the running user.
+RUN mkdir -p /opt/spark-work /opt/spark-logs /tmp/spark-events
+
+COPY common/ /opt/pipeline/common/
+COPY streaming/ /opt/pipeline/streaming/
+COPY batch/ /opt/pipeline/batch/
+
+CMD ["python", "-c", "import pyspark; print('spark image ready', pyspark.__version__)"]

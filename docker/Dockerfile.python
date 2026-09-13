@@ -1,0 +1,29 @@
+# =============================================================================
+# Lightweight image for the two simulated data sources and the serving API.
+# No JVM, no Spark: these are plain Python services and should start in seconds.
+# =============================================================================
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/opt/pipeline
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-base.txt requirements-api.txt /tmp/
+RUN pip install --no-cache-dir -r /tmp/requirements-api.txt
+
+WORKDIR /opt/pipeline
+
+COPY common/ /opt/pipeline/common/
+COPY producers/ /opt/pipeline/producers/
+COPY serving/ /opt/pipeline/serving/
+
+# Run as a non-root user: nothing here needs privileges.
+RUN useradd --create-home --uid 1000 pipeline \
+    && chown -R pipeline:pipeline /opt/pipeline
+USER pipeline
+
+CMD ["python", "-c", "print('python image ready')"]

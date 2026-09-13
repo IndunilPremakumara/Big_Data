@@ -1,0 +1,6 @@
+# Shared by producers, the serving API and Spark jobs.
+confluent-kafka==2.5.3
+boto3==1.35.36
+psycopg[binary]==3.2.3
+prometheus-client==0.21.0
+python-dotenv==1.0.1
